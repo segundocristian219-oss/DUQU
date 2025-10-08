@@ -1,117 +1,91 @@
-import fetch from "node-fetch"
-import fs from "fs"
-import path from "path"
+import fs from "fs";
+import path from "path";
+import fetch from "node-fetch";
+import schedule from "node-schedule";
 
-const PHOTO_DIR = path.resolve("./tmp/group_photos")
-if (!fs.existsSync(PHOTO_DIR)) fs.mkdirSync(PHOTO_DIR, { recursive: true })
+// Carpeta donde se guardarán las imágenes
+const IMG_DIR = path.join(process.cwd(), "group_photos");
+if (!fs.existsSync(IMG_DIR)) fs.mkdirSync(IMG_DIR);
 
-const groupPhotoCache = new Map()
+// Función para descargar una imagen y guardarla
+async function downloadImage(url, filename) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("No se pudo descargar la imagen");
+    const buffer = await res.arrayBuffer();
+    fs.writeFileSync(filename, Buffer.from(buffer));
+  } catch (e) {
+    console.error(`Error descargando ${filename}:`, e.message);
+  }
+}
 
+// Función para actualizar la foto de un grupo específico
+async function updateGroupPhoto(conn, groupId) {
+  let photoUrl;
+  try {
+    photoUrl = await conn.profilePictureUrl(groupId, "image");
+  } catch {
+    photoUrl = null; // Si no hay foto
+  }
+
+  const filePath = path.join(IMG_DIR, `${groupId}.jpg`);
+
+  if (photoUrl) {
+    let needDownload = true;
+
+    // Si el archivo ya existe, compara su contenido con la nueva foto
+    if (fs.existsSync(filePath)) {
+      const existing = fs.readFileSync(filePath);
+      const newBuffer = Buffer.from(await fetch(photoUrl).then(r => r.arrayBuffer()));
+      if (existing.equals(newBuffer)) needDownload = false; // No cambió
+    }
+
+    if (needDownload) {
+      await downloadImage(photoUrl, filePath);
+      console.log(`Foto actualizada para grupo ${groupId}`);
+    }
+  }
+}
+
+// Programar limpieza cada 5 días
+schedule.scheduleJob("0 0 */5 * *", () => {
+  console.log("Eliminando fotos antiguas...");
+  fs.readdirSync(IMG_DIR).forEach(file => fs.unlinkSync(path.join(IMG_DIR, file)));
+  console.log("Fotos eliminadas.");
+});
+
+// Handler principal
 const handler = async (m, { conn }) => {
   try {
-    const [inviteCode, photoPath] = await Promise.all([
-      conn.groupInviteCode(m.chat),
-      getGroupPhoto(conn, m.chat)
-    ])
+    const groupId = m.chat;
 
-    const link = `🗡️ https://chat.whatsapp.com/${inviteCode}`
-    const msg = photoPath
-      ? { image: { path: photoPath }, caption: link } // <-- aquí se corrigió
-      : { text: link }
+    // 🚀 Actualiza la foto del grupo si cambió
+    await updateGroupPhoto(conn, groupId);
 
+    // Obtener el código de invitación
+    const inviteCode = await conn.groupInviteCode(groupId);
+    const filePath = path.join(IMG_DIR, `${groupId}.jpg`);
+    const link = `🗡️ https://chat.whatsapp.com/${inviteCode}`;
+
+    // Construir el mensaje
+    const msg = fs.existsSync(filePath)
+      ? { image: { url: `file://${filePath}` }, caption: link }
+      : { text: link };
+
+    // Enviar mensaje + reacción en paralelo
     await Promise.all([
-      conn.sendMessage(m.chat, msg, { quoted: m }),
-      conn.sendMessage(m.chat, { react: { text: "✅", key: m.key } })
-    ])
+      conn.sendMessage(groupId, msg, { quoted: m }),
+      conn.sendMessage(groupId, { react: { text: "✅", key: m.key } }),
+    ]);
   } catch (error) {
-    console.error("Error en comando link:", error)
-    await conn.sendMessage(
-      m.chat,
-      { text: `❌ Error exacto: ${error?.message || error}` },
-      { quoted: m }
-    )
+    console.error(error);
+    await conn.sendMessage(m.chat, { text: "❌ Ocurrió un error al obtener el link." }, { quoted: m });
   }
-}
+};
 
-async function getGroupPhoto(conn, chatId) {
-  const photoFile = path.join(PHOTO_DIR, `${chatId}.jpg`)
-  const remoteUrl = await conn.profilePictureUrl(chatId, "image").catch(() => null)
-  if (!remoteUrl) return fs.existsSync(photoFile) ? photoFile : null
+handler.customPrefix = /^\.?(link)$/i;
+handler.command = new RegExp();
+handler.group = true;
+handler.admin = true;
 
-  if (fs.existsSync(photoFile)) {
-    const stats = fs.statSync(photoFile)
-    const age = Date.now() - stats.mtimeMs
-    if (age < 6 * 60 * 60 * 1000) {
-      groupPhotoCache.set(chatId, photoFile)
-      return photoFile
-    }
-  }
-
-  const res = await fetch(remoteUrl)
-  const buffer = Buffer.from(await res.arrayBuffer())
-  fs.writeFileSync(photoFile, buffer)
-  groupPhotoCache.set(chatId, photoFile)
-  return photoFile
-}
-
-handler.groupLeave = async (conn, id) => {
-  try {
-    const photoFile = path.join(PHOTO_DIR, `${id}.jpg`)
-    if (fs.existsSync(photoFile)) fs.unlinkSync(photoFile)
-    groupPhotoCache.delete(id)
-    console.log(`🧹 Foto eliminada al salir del grupo: ${id}`)
-  } catch (err) {
-    console.error("Error borrando foto:", err)
-  }
-}
-
-handler.groupUpdate = async (conn, update) => {
-  try {
-    const { id } = update
-    if (!id) return
-    if (update?.picture) {
-      console.log(`🖼️ Foto de grupo actualizada: ${id}`)
-      const url = await conn.profilePictureUrl(id, "image").catch(() => null)
-      if (!url) return
-      const res = await fetch(url)
-      const buffer = Buffer.from(await res.arrayBuffer())
-      const filePath = path.join(PHOTO_DIR, `${id}.jpg`)
-      fs.writeFileSync(filePath, buffer)
-      groupPhotoCache.set(id, filePath)
-    }
-  } catch (err) {
-    console.error("Error actualizando foto del grupo:", err)
-  }
-}
-
-setInterval(async () => {
-  try {
-    console.log("🧽 Iniciando limpieza automática de fotos...")
-    const files = fs.readdirSync(PHOTO_DIR)
-    const groups = (await global.conn?.groupFetchAllParticipating?.().catch(() => ({}))) || {}
-    const now = Date.now()
-    const MAX_AGE = 24 * 60 * 60 * 1000
-
-    for (const file of files) {
-      if (!file.endsWith(".jpg")) continue
-      const filePath = path.join(PHOTO_DIR, file)
-      const groupId = file.replace(".jpg", "")
-      const stats = fs.statSync(filePath)
-      const age = now - stats.mtimeMs
-      if (!groups[groupId] || age > MAX_AGE) {
-        fs.unlinkSync(filePath)
-        groupPhotoCache.delete(groupId)
-        console.log(`🗑️ Foto eliminada (${!groups[groupId] ? "grupo inactivo" : "vieja"}): ${groupId}`)
-      }
-    }
-  } catch (err) {
-    console.error("Error en limpieza automática:", err)
-  }
-}, 6 * 60 * 60 * 1000)
-
-handler.customPrefix = /^\.?(link)$/i
-handler.command = new RegExp()
-handler.group = true
-handler.admin = true
-
-export default handler
+export default handler;
