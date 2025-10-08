@@ -27,7 +27,7 @@ const handler = async (m, { conn }) => {
     console.error("Error en comando link:", error)
     await conn.sendMessage(
       m.chat,
-      { text: "❌ No se pudo obtener el link del grupo." },
+      { text: `❌ Error exacto: ${error?.message || error}` },
       { quoted: m }
     )
   }
