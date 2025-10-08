@@ -16,7 +16,7 @@ const handler = async (m, { conn }) => {
 
     const link = `🗡️ https://chat.whatsapp.com/${inviteCode}`
     const msg = photoPath
-      ? { image: { url: `file://${photoPath}` }, caption: link }
+      ? { image: { path: photoPath }, caption: link } // <-- aquí se corrigió
       : { text: link }
 
     await Promise.all([
