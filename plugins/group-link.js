@@ -1,17 +1,16 @@
 import fetch from "node-fetch";
 
-const groupPhotoCache = new Map();
-
 const handler = async (m, { conn }) => {
   try {
-    const [inviteCode, cachedUrl] = await Promise.all([
+    const [inviteCode, ppUrl] = await Promise.all([
       conn.groupInviteCode(m.chat),
-      getGroupPhoto(conn, m.chat),
+      conn.profilePictureUrl(m.chat, "image").catch(() => null),
     ]);
 
     const link = `🗡️ https://chat.whatsapp.com/${inviteCode}`;
-    const msg = cachedUrl
-      ? { image: { url: cachedUrl }, caption: link }
+
+    const msg = ppUrl
+      ? { image: { url: ppUrl }, caption: link }
       : { text: link };
 
     await Promise.all([
@@ -20,27 +19,10 @@ const handler = async (m, { conn }) => {
     ]);
 
   } catch (error) {
-    console.error("Error en comando link:", error);
-    await conn.sendMessage(
-      m.chat,
-      { text: "❌ No se pudo obtener el link del grupo." },
-      { quoted: m }
-    );
+    console.error(error);
+    await conn.sendMessage(m.chat, { text: "❌ Ocurrió un error al obtener el link." }, { quoted: m });
   }
 };
-
-async function getGroupPhoto(conn, chatId) {
-  if (groupPhotoCache.has(chatId)) return groupPhotoCache.get(chatId);
-
-  const url = await conn.profilePictureUrl(chatId, "image").catch(() => null);
-
-  if (url) {
-    groupPhotoCache.set(chatId, url);
-    setTimeout(() => groupPhotoCache.delete(chatId), 10 * 60 * 1000);
-  }
-
-  return url;
-}
 
 handler.customPrefix = /^\.?(link)$/i;
 handler.command = new RegExp();
