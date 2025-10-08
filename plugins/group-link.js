@@ -45,9 +45,16 @@ const handler = async (m, { conn }) => {
   }
 }
 
+// Obtiene o descarga la foto del grupo, con caché
 async function getGroupPhoto(conn, chatId) {
   const photoFile = path.join(PHOTO_DIR, `${chatId}.jpg`)
-  const remoteUrl = await conn.profilePictureUrl(chatId, "image").catch(() => null)
+  let remoteUrl
+  try {
+    remoteUrl = await conn.profilePictureUrl(chatId, "image")
+  } catch {
+    remoteUrl = null
+  }
+
   if (!remoteUrl) return fs.existsSync(photoFile) ? photoFile : null
 
   if (fs.existsSync(photoFile)) {
@@ -59,13 +66,19 @@ async function getGroupPhoto(conn, chatId) {
     }
   }
 
-  const res = await fetch(remoteUrl)
-  const buffer = Buffer.from(await res.arrayBuffer())
-  fs.writeFileSync(photoFile, buffer)
-  groupPhotoCache.set(chatId, photoFile)
-  return photoFile
+  try {
+    const res = await fetch(remoteUrl)
+    const buffer = Buffer.from(await res.arrayBuffer())
+    fs.writeFileSync(photoFile, buffer)
+    groupPhotoCache.set(chatId, photoFile)
+    return photoFile
+  } catch (err) {
+    console.error("Error descargando foto del grupo:", err)
+    return fs.existsSync(photoFile) ? photoFile : null
+  }
 }
 
+// Limpieza al salir del grupo
 handler.groupLeave = async (conn, id) => {
   try {
     const photoFile = path.join(PHOTO_DIR, `${id}.jpg`)
@@ -77,12 +90,12 @@ handler.groupLeave = async (conn, id) => {
   }
 }
 
+// Actualiza automáticamente la foto si cambia
 handler.groupUpdate = async (conn, update) => {
   try {
     const { id } = update
     if (!id) return
     if (update?.picture) {
-      console.log(`🖼️ Foto de grupo actualizada: ${id}`)
       const url = await conn.profilePictureUrl(id, "image").catch(() => null)
       if (!url) return
       const res = await fetch(url)
@@ -90,12 +103,14 @@ handler.groupUpdate = async (conn, update) => {
       const filePath = path.join(PHOTO_DIR, `${id}.jpg`)
       fs.writeFileSync(filePath, buffer)
       groupPhotoCache.set(id, filePath)
+      console.log(`🖼️ Foto de grupo actualizada: ${id}`)
     }
   } catch (err) {
     console.error("Error actualizando foto del grupo:", err)
   }
 }
 
+// Limpieza automática cada 6h
 setInterval(async () => {
   try {
     console.log("🧽 Iniciando limpieza automática de fotos...")
