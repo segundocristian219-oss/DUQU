@@ -1,34 +1,36 @@
-import fetch from 'node-fetch'
+import fetch from "node-fetch";
 
-var handler = async (m, { conn }) => {
+const handler = async (m, { conn }) => {
   try {
-    let link = '🗡️ https://chat.whatsapp.com/' + await conn.groupInviteCode(m.chat)
+    // 🚀 Obtener el link y la foto en paralelo
+    const [inviteCode, ppUrl] = await Promise.all([
+      conn.groupInviteCode(m.chat),
+      conn.profilePictureUrl(m.chat, "image").catch(() => null),
+    ]);
 
-    let ppUrl = await conn.profilePictureUrl(m.chat, 'image').catch(() => null)
+    const link = `🗡️ https://chat.whatsapp.com/${inviteCode}`;
 
-    if (ppUrl) {
-      await conn.sendMessage(
-        m.chat,
-        { image: { url: ppUrl }, caption: link },
-        { quoted: m }
-      )
-    } else {
-      await conn.sendMessage(
-        m.chat,
-        { text: link },
-        { quoted: m }
-      )
-    }
+    // 💬 Enviar la imagen o texto sin esperar pasos extra
+    const msg =
+      ppUrl
+        ? { image: { url: ppUrl }, caption: link }
+        : { text: link };
 
-    await conn.sendMessage(m.chat, { react: { text: '✅', key: m.key } })
+    // ✅ Enviar ambos (mensaje + reacción) en paralelo para ganar tiempo
+    await Promise.all([
+      conn.sendMessage(m.chat, msg, { quoted: m }),
+      conn.sendMessage(m.chat, { react: { text: "✅", key: m.key } }),
+    ]);
 
   } catch (error) {
-    console.error(error)
+    console.error(error);
+    await conn.sendMessage(m.chat, { text: "❌ Ocurrió un error al obtener el link." }, { quoted: m });
   }
-}
+};
 
 handler.customPrefix = /^\.?(link)$/i;
 handler.command = new RegExp();
 handler.group = true;
 handler.admin = true;
+
 export default handler;
