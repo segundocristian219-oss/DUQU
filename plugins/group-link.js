@@ -9,14 +9,26 @@ const groupPhotoCache = new Map()
 
 const handler = async (m, { conn }) => {
   try {
-    const [inviteCode, photoPath] = await Promise.all([
-      conn.groupInviteCode(m.chat),
-      getGroupPhoto(conn, m.chat)
-    ])
+    const photoPath = await getGroupPhoto(conn, m.chat)
+
+    let inviteCode
+    try {
+      inviteCode = await conn.groupInviteCode(m.chat)
+    } catch {
+      inviteCode = null
+    }
+
+    if (!inviteCode) {
+      return await conn.sendMessage(
+        m.chat,
+        { text: "❌ No se pudo obtener el link del grupo. Asegúrate de que el bot sea admin y que estés en un chat de grupo." },
+        { quoted: m }
+      )
+    }
 
     const link = `🗡️ https://chat.whatsapp.com/${inviteCode}`
     const msg = photoPath
-      ? { image: { path: photoPath }, caption: link } // <-- aquí se corrigió
+      ? { image: { path: photoPath }, caption: link }
       : { text: link }
 
     await Promise.all([
@@ -27,7 +39,7 @@ const handler = async (m, { conn }) => {
     console.error("Error en comando link:", error)
     await conn.sendMessage(
       m.chat,
-      { text: `❌ Error exacto: ${error?.message || error}` },
+      { text: `❌ Error inesperado: ${error?.message || error}` },
       { quoted: m }
     )
   }
