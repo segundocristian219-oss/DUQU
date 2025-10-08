@@ -5,7 +5,7 @@ const handler = async (m, { conn, participants }) => {
     if (!m.isGroup || m.key.fromMe) return
 
     // === fkontak con icono ===
-    const res = await fetch('https://i.postimg.cc/rFfVL8Ps/image.jpg');
+    const res = await fetch('https://cdn.russellxz.click/a8bbd3ad.jpeg');
     const thumb = Buffer.from(await res.arrayBuffer());
     const fkontak = {
         key: {
@@ -16,7 +16,7 @@ const handler = async (m, { conn, participants }) => {
         },
         message: {
             locationMessage: {
-                name: `𝖧𝗈𝗅𝖺, 𝖲𝗈𝗒 𝖡𝖺𝗄𝗂-𝖡𝗈𝗍`,
+                name: `𝖧𝗈𝗅𝖺, 𝖲𝗈𝗒 Angel bot 🧟`,
                 jpegThumbnail: thumb
             }
         },
