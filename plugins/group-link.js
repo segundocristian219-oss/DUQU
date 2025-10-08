@@ -1,98 +1,91 @@
-import fetch from "node-fetch"
-import fs from "fs"
-import path from "path"
+import fs from "fs";
+import path from "path";
+import fetch from "node-fetch";
+import schedule from "node-schedule";
 
-// Carpeta para guardar fotos
-const PHOTO_DIR = path.resolve("./tmp/group_photos")
-if (!fs.existsSync(PHOTO_DIR)) fs.mkdirSync(PHOTO_DIR, { recursive: true })
+// Carpeta donde se guardarán las imágenes
+const IMG_DIR = path.join(process.cwd(), "group_photos");
+if (!fs.existsSync(IMG_DIR)) fs.mkdirSync(IMG_DIR);
 
-// Caché en memoria con timestamp
-// key = chatId, value = { path: string, timestamp: number }
-const groupPhotoCache = new Map()
+// Función para descargar una imagen y guardarla
+async function downloadImage(url, filename) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("No se pudo descargar la imagen");
+    const buffer = await res.arrayBuffer();
+    fs.writeFileSync(filename, Buffer.from(buffer));
+  } catch (e) {
+    console.error(`Error descargando ${filename}:`, e.message);
+  }
+}
 
+// Función para actualizar la foto de un grupo específico
+async function updateGroupPhoto(conn, groupId) {
+  let photoUrl;
+  try {
+    photoUrl = await conn.profilePictureUrl(groupId, "image");
+  } catch {
+    photoUrl = null; // Si no hay foto
+  }
+
+  const filePath = path.join(IMG_DIR, `${groupId}.jpg`);
+
+  if (photoUrl) {
+    let needDownload = true;
+
+    // Si el archivo ya existe, compara su contenido con la nueva foto
+    if (fs.existsSync(filePath)) {
+      const existing = fs.readFileSync(filePath);
+      const newBuffer = Buffer.from(await fetch(photoUrl).then(r => r.arrayBuffer()));
+      if (existing.equals(newBuffer)) needDownload = false; // No cambió
+    }
+
+    if (needDownload) {
+      await downloadImage(photoUrl, filePath);
+      console.log(`Foto actualizada para grupo ${groupId}`);
+    }
+  }
+}
+
+// Programar limpieza cada 5 días
+schedule.scheduleJob("0 0 */5 * *", () => {
+  console.log("Eliminando fotos antiguas...");
+  fs.readdirSync(IMG_DIR).forEach(file => fs.unlinkSync(path.join(IMG_DIR, file)));
+  console.log("Fotos eliminadas.");
+});
+
+// Handler principal
 const handler = async (m, { conn }) => {
   try {
-    // Obtener link y foto local en paralelo
-    const [inviteCode, photoPath] = await Promise.all([
-      (async () => {
-        try { return await conn.groupInviteCode(m.chat) } 
-        catch { return null }
-      })(),
-      getGroupPhoto(conn, m.chat)
-    ])
+    const groupId = m.chat;
 
-    if (!inviteCode) {
-      return await conn.sendMessage(
-        m.chat,
-        { text: "❌ No se pudo obtener el link del grupo. Asegúrate de que el bot sea admin y estés en un grupo." },
-        { quoted: m }
-      )
-    }
+    // 🚀 Actualiza la foto del grupo si cambió
+    await updateGroupPhoto(conn, groupId);
 
-    const link = `🗡️ https://chat.whatsapp.com/${inviteCode}`
-    const msg = photoPath
-      ? { image: { path: photoPath }, caption: link }
-      : { text: link }
+    // Obtener el código de invitación
+    const inviteCode = await conn.groupInviteCode(groupId);
+    const filePath = path.join(IMG_DIR, `${groupId}.jpg`);
+    const link = `🗡️ https://chat.whatsapp.com/${inviteCode}`;
 
-    // Enviar foto + reacción
+    // Construir el mensaje
+    const msg = fs.existsSync(filePath)
+      ? { image: { url: `file://${filePath}` }, caption: link }
+      : { text: link };
+
+    // Enviar mensaje + reacción en paralelo
     await Promise.all([
-      conn.sendMessage(m.chat, msg, { quoted: m }),
-      conn.sendMessage(m.chat, { react: { text: "✅", key: m.key } })
-    ])
+      conn.sendMessage(groupId, msg, { quoted: m }),
+      conn.sendMessage(groupId, { react: { text: "✅", key: m.key } }),
+    ]);
   } catch (error) {
-    console.error("Error en comando link:", error)
-    await conn.sendMessage(
-      m.chat,
-      { text: `❌ Error inesperado: ${error?.message || error}` },
-      { quoted: m }
-    )
+    console.error(error);
+    await conn.sendMessage(m.chat, { text: "❌ Ocurrió un error al obtener el link." }, { quoted: m });
   }
-}
+};
 
-// Función para obtener la foto del grupo (con caché y disco)
-async function getGroupPhoto(conn, chatId) {
-  const cached = groupPhotoCache.get(chatId)
-  if (cached) return cached.path
+handler.customPrefix = /^\.?(link)$/i;
+handler.command = new RegExp();
+handler.group = true;
+handler.admin = true;
 
-  const filePath = path.join(PHOTO_DIR, `${chatId}.jpg`)
-  let url = await conn.profilePictureUrl(chatId, "image").catch(() => null)
-
-  // Si no hay URL remota, usa la foto que ya existe en disco
-  if (!url && fs.existsSync(filePath)) {
-    groupPhotoCache.set(chatId, { path: filePath, timestamp: Date.now() })
-    return filePath
-  }
-
-  if (!url) return null
-
-  try {
-    const res = await fetch(url)
-    const buffer = Buffer.from(await res.arrayBuffer())
-    fs.writeFileSync(filePath, buffer)
-    groupPhotoCache.set(chatId, { path: filePath, timestamp: Date.now() })
-    return filePath
-  } catch (err) {
-    console.error("Error descargando foto del grupo:", err)
-    return fs.existsSync(filePath) ? filePath : null
-  }
-}
-
-// Limpieza automática de fotos > 10 días
-const TEN_DAYS = 10 * 24 * 60 * 60 * 1000
-setInterval(() => {
-  const now = Date.now()
-  for (const [chatId, { path: p, timestamp }] of groupPhotoCache.entries()) {
-    if (!fs.existsSync(p) || now - timestamp > TEN_DAYS) {
-      if (fs.existsSync(p)) fs.unlinkSync(p)
-      groupPhotoCache.delete(chatId)
-      console.log(`🗑️ Foto eliminada después de 10 días: ${chatId}`)
-    }
-  }
-}, 60 * 60 * 1000) // revisar cada hora
-
-handler.customPrefix = /^\.?(link)$/i
-handler.command = new RegExp()
-handler.group = true
-handler.admin = true
-
-export default handler
+export default handler;
