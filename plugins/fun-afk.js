@@ -1,4 +1,6 @@
-import { generateWAMessageFromContent, proto } from '@whiskeysockets/baileys'
+// fun-afk.js
+import pkg from '@whiskeysockets/baileys'
+const { generateWAMessageFromContent, proto } = pkg
 
 let afk = {
   isAFK: false,
@@ -39,9 +41,8 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
     // Opcional: eliminar mensaje que mencionó al AFK (requiere permisos admin)
     try {
       await conn.sendMessage(from, { text: reply }, { quoted: m })
-      await conn.sendMessage(from, { delete: m.key }) // intenta eliminar mensaje
+      await conn.sendMessage(from, { delete: m.key })
     } catch (e) {
-      // Si no se puede eliminar, solo manda el aviso
       await conn.sendMessage(from, { text: reply }, { quoted: m })
     }
   }
