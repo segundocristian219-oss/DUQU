@@ -2,13 +2,14 @@
 import pkg from '@whiskeysockets/baileys'
 const { generateWAMessageFromContent, proto } = pkg
 
+// Estado global AFK
 let afk = {
   isAFK: false,
   reason: '',
   user: ''
 }
 
-const handler = async (m, { conn, text, usedPrefix, command }) => {
+const handler = async (m, { conn, text, command }) => {
   const from = m.chat
   const sender = m.sender
 
@@ -30,23 +31,26 @@ const handler = async (m, { conn, text, usedPrefix, command }) => {
   // ===== Usuario vuelve del AFK =====
   if (afk.isAFK && sender === afk.user) {
     afk.isAFK = false
-    const reply = '👋 Hola de vuelta hermosa'
-    await conn.sendMessage(from, { text: reply }, { quoted: m })
+    await conn.sendMessage(from, { text: '👋 Hola de vuelta hermosa' }, { quoted: m })
   }
 
   // ===== Alguien menciona al usuario AFK =====
   if (afk.isAFK && m.mentionedJid && m.mentionedJid.includes(afk.user) && sender !== afk.user && !m.key.fromMe) {
     const reply = `⏳ Eliminé esa mención\n💬 ${afk.reason ? 'Motivo: ' + afk.reason : ''}`
-    
-    // Opcional: eliminar mensaje que mencionó al AFK (requiere permisos admin)
     try {
+      // Enviar aviso
       await conn.sendMessage(from, { text: reply }, { quoted: m })
+      // Intentar eliminar la mención (requiere permisos admin en grupo)
       await conn.sendMessage(from, { delete: m.key })
     } catch (e) {
+      // Si no se puede eliminar, solo enviar aviso
       await conn.sendMessage(from, { text: reply }, { quoted: m })
     }
   }
 }
 
+// 🔑 Esto permite que el handler escuche todos los mensajes, no solo comandos
+handler.all = true
 handler.command = ['afk']
+
 export default handler
