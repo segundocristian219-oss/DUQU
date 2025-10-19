@@ -16,7 +16,7 @@ let handler = async (m, { conn }) => {
   const owners = [
     {
       name: '𝖧𝖾𝗋𝗇𝖺𝗇𝖽𝖾𝗌.𝗑𝗒𝗓',
-      desc: `👑 Creador Principal de Angel bot 🧟`,
+      desc: `👑 Creador Principal de 𝑺𝑾Λ𝜯ㅤ𝜝𝜣𝜯 🧟`,
       image: 'https://cdn.russellxz.click/af65870a.jpeg',
       footer: '𝗄𝗄',
       buttons: [
@@ -25,12 +25,12 @@ let handler = async (m, { conn }) => {
       ]
     },
     {
-      name: '𝖠𝗇𝗀el',
+      name: 'Mau',
       desc: 'Dueño del bot 🏞️',
-      image: 'https://cdn.russellxz.click/9fafd8ea.jpeg',
+      image: 'https://cdn.russellxz.click/598f2336.jpeg',
       footer: '𝖭𝗂𝖼𝖾 𝖣𝗈 𝖸𝗈𝗎',
       buttons: [
-        { name: 'WhatsApp', url: 'https://wa.me/5217298119179' }
+        { name: 'WhatsApp', url: 'https://wa.me/13065561343' }
 
       ]
     }
@@ -76,7 +76,7 @@ let handler = async (m, { conn }) => {
           },
           interactiveMessage: proto.Message.InteractiveMessage.fromObject({
             body: proto.Message.InteractiveMessage.Body.create({
-              text: `👑 Creadores de baki Bot`
+              text: `👑 Creadores de 𝑺𝑾Λ𝜯ㅤ𝜝𝜣𝜯`
             }),
             footer: proto.Message.InteractiveMessage.Footer.create({
               text: 'Conoce a los desarrolladores del bot'
