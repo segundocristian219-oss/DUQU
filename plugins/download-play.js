@@ -1,159 +1,360 @@
-import axios from "axios";
-import yts from "yt-search";
-import fs from "fs";
-import path from "path";
-import ffmpeg from "fluent-ffmpeg";
-import { promisify } from "util";
-import { pipeline } from "stream";
+import axios from "axios"
+import yts from "yt-search"
+import fs from "fs"
+import path from "path"
+import ffmpeg from "fluent-ffmpeg"
+import { promisify } from "util"
+import { pipeline } from "stream"
+import crypto from "crypto"
 
-const streamPipe = promisify(pipeline);
+const streamPipe = promisify(pipeline)
 
-// ==== CONFIG DE TU API ====
-const API_BASE = process.env.API_BASE || "https://api-sky.ultraplus.click";
-const API_KEY  = process.env.API_KEY  || "Russellxz"; // <-- tu API Key
+const TMP_DIR = path.join(process.cwd(), "tmp")
+if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true })
 
-// ==== UTILIDADES ====
-async function downloadToFile(url, filePath) {
-  const res = await axios.get(url, { responseType: "stream" });
-  await streamPipe(res.data, fs.createWriteStream(filePath));
-  return filePath;
+const CACHE_FILE = path.join(TMP_DIR, "cache.json")
+
+const API_BASE = (process.env.API_BASE || "https://api-sky.ultraplus.click").replace(/\/+$/, "")
+const API_KEY = process.env.API_KEY || "sk_80d69172-f6c4-430d-be35-395b72e7113b"
+
+const MAX_CONCURRENT = 3
+const MAX_MB = 99
+const DOWNLOAD_TIMEOUT = 60000
+const CACHE_TTL = 1000 * 60 * 60 * 24 * 7
+
+let active = 0
+const queue = []
+const tasks = {}
+let cache = loadCache()
+
+function safeUnlink(f) {
+  try { f && fs.existsSync(f) && fs.unlinkSync(f) } catch {}
 }
 
-function fileSizeMB(filePath) {
-  const b = fs.statSync(filePath).size;
-  return b / (1024 * 1024);
+function fileSizeMB(f) {
+  try { return fs.statSync(f).size / 1024 / 1024 } catch { return 0 }
 }
 
-async function callMyApi(url, format) {
-  const r = await axios.get(`${API_BASE}/api/download/yt.php`, {
-    params: { url, format },
-    headers: { Authorization: `Bearer ${API_KEY}` },
-    timeout: 60000
-  });
-  if (!r.data || r.data.status !== "true" || !r.data.data) {
-    throw new Error("API inválida o sin datos");
+function readHeader(file, len = 16) {
+  try {
+    const fd = fs.openSync(file, "r")
+    const buf = Buffer.alloc(len)
+    fs.readSync(fd, buf, 0, len, 0)
+    fs.closeSync(fd)
+    return buf.toString("hex")
+  } catch {
+    return ""
   }
-  return r.data.data;
 }
 
-// ==== COMANDO PRINCIPAL ====
-const handler = async (msg, { conn, text }) => {
-  const pref = global.prefixes?.[0] || ".";
+function validFile(file) {
+  if (!file || !fs.existsSync(file)) return false
+  const size = fs.statSync(file).size
+  if (size < 500000) return false
+  const hex = readHeader(file)
+  if (file.endsWith(".mp3") && !(hex.startsWith("494433") || hex.startsWith("fff"))) return false
+  if (file.endsWith(".mp4") && !hex.includes("66747970")) return false
+  return true
+}
 
-  if (!text || !text.trim()) {
-    return conn.sendMessage(
-      msg.key.remoteJid,
-      { text: `✳️ Usa:\n${pref}play <término>\nEj: *${pref}play* bad bunny diles` },
-      { quoted: msg }
-    );
+function saveCache() {
+  try { fs.writeFileSync(CACHE_FILE, JSON.stringify(cache)) } catch {}
+}
+
+function loadCache() {
+  try {
+    if (!fs.existsSync(CACHE_FILE)) return {}
+    const data = JSON.parse(fs.readFileSync(CACHE_FILE))
+    const now = Date.now()
+    for (const id in data) {
+      if (now - data[id].timestamp > CACHE_TTL) delete data[id]
+      else {
+        for (const k in data[id].files) {
+          if (!fs.existsSync(data[id].files[k])) delete data[id].files[k]
+        }
+      }
+    }
+    return data
+  } catch {
+    return {}
+  }
+}
+
+async function queueDownload(task) {
+  if (active >= MAX_CONCURRENT) await new Promise(r => queue.push(r))
+  active++
+  try {
+    return await task()
+  } finally {
+    active--
+    queue.shift()?.()
+  }
+}
+
+function isApiUrl(url = "") {
+  try {
+    const u = new URL(url)
+    const b = new URL(API_BASE)
+    return u.host === b.host
+  } catch {
+    return false
+  }
+}
+
+async function callYoutubeResolve(videoUrl, { type }) {
+  const endpoint = `${API_BASE}/youtube/resolve`
+
+  const body =
+    type === "video"
+      ? { url: videoUrl, type: "video", quality: "360" }
+      : { url: videoUrl, type: "audio", format: "mp3" }
+
+  const res = await axios.post(endpoint, body, {
+    timeout: 120000,
+    headers: {
+      "Content-Type": "application/json",
+      apikey: API_KEY,
+      Accept: "application/json"
+    },
+    validateStatus: () => true
+  })
+
+  const data = typeof res.data === "object" ? res.data : null
+  if (!data) throw "Respuesta inválida"
+
+  const ok = data.status === true || data.success === true || data.ok === true
+  if (!ok) throw (data.message || "Error API")
+
+  const result = data.result || data.data || data
+  if (!result?.media) throw "Sin media"
+
+  let dl = result.media.dl_download || result.media.direct || ""
+  if (dl.startsWith("/")) dl = API_BASE + dl
+
+  return dl || null
+}
+
+async function downloadStream(url, file) {
+  const headers = {
+    "User-Agent": "Mozilla/5.0",
+    Accept: "*/*"
   }
 
-  // reacción de carga
-  await conn.sendMessage(msg.key.remoteJid, {
-    react: { text: "🕒", key: msg.key }
-  });
+  if (isApiUrl(url)) headers.apikey = API_KEY
 
-  // búsqueda
-  const res = await yts(text);
-  const video = res.videos?.[0];
-  if (!video) {
-    return conn.sendMessage(msg.key.remoteJid, { text: "❌ Sin resultados." }, { quoted: msg });
+  const res = await axios.get(url, {
+    responseType: "stream",
+    timeout: DOWNLOAD_TIMEOUT,
+    maxRedirects: 5,
+    headers,
+    validateStatus: () => true
+  })
+
+  if (res.status >= 400) throw `HTTP ${res.status}`
+
+  await streamPipe(res.data, fs.createWriteStream(file))
+  return file
+}
+
+async function toMp3(input) {
+  if (input.endsWith(".mp3")) return input
+
+  const out = input.replace(/\.\w+$/, ".mp3")
+
+  await new Promise((res, rej) =>
+    ffmpeg(input)
+      .audioCodec("libmp3lame")
+      .audioBitrate("128k")
+      .save(out)
+      .on("end", res)
+      .on("error", rej)
+  )
+
+  safeUnlink(input)
+  return out
+}
+
+async function startDownload(id, key, mediaUrl) {
+  if (tasks[id]?.[key]) return tasks[id][key]
+
+  tasks[id] = tasks[id] || {}
+
+  const ext = key === "audio" ? "mp3" : "mp4"
+  const file = path.join(TMP_DIR, `${crypto.randomUUID()}.${ext}`)
+
+  tasks[id][key] = queueDownload(async () => {
+    await downloadStream(mediaUrl, file)
+    const final = key === "audio" ? await toMp3(file) : file
+
+    if (!validFile(final)) throw "Archivo inválido"
+    if (fileSizeMB(final) > MAX_MB) throw "Archivo muy grande"
+
+    return final
+  })
+
+  return tasks[id][key]
+}
+
+async function sendFile(conn, job, file, isDoc, type, quoted) {
+  if (!validFile(file)) {
+    await conn.sendMessage(job.chatId, { text: "❌ Archivo inválido." }, { quoted })
+    return
   }
 
-  const { url: videoUrl, title, author, timestamp: duration, views, thumbnail } = video;
+  const buffer = fs.readFileSync(file)
+  const msg = {}
 
-  // plantilla decorada ✨
-  const caption = `
-> *𝙰𝚄𝙳𝙸𝙾 𝙳𝙾𝚆𝙽𝙻𝙾𝙰𝙳𝙴𝚁*
+  if (isDoc) msg.document = buffer
+  else if (type === "audio") msg.audio = buffer
+  else msg.video = buffer
 
-⭒ ִֶָ७ ꯭🎵˙⋆｡ - *𝚃𝚒́𝚝𝚞𝚕𝚘:* ${title}
-⭒ ִֶָ७ ꯭🎤˙⋆｡ - *𝙰𝚛𝚝𝚒𝚜𝚝𝚊:* ${author?.name || "Desconocido"}
-⭒ ִֶָ७ ꯭🕑˙⋆｡ - *𝙳𝚞𝚛𝚊𝚌𝚒ó𝚗:* ${duration}
-⭒ ִֶָ७ ꯭📺˙⋆｡ - *𝙲𝚊𝚕𝚒𝚍𝚊𝚍:* 128kbps
-⭒ ִֶָ७ ꯭🌐˙⋆｡ - *𝙰𝚙𝚒:* sky
-
-» *𝘌𝘕𝘝𝘐𝘈𝘕𝘋𝘖 𝘈𝘜𝘋𝘐𝘖* 🎧
-» *𝘈𝘎𝘜𝘈𝘙𝘋𝘌 𝘜𝘕 𝘗𝘖𝘊𝘖*...
-
-⇆‌ ㅤ◁ㅤㅤ❚❚ㅤㅤ▷ㅤ↻
-
-> \`\`\`© 𝖯𝗈𝗐𝖾𝗋𝖾𝗱 𝖻𝗒 Angel.𝗑𝗒𝗓\`\`\`
-`.trim();
-
-  // envía preview con info
   await conn.sendMessage(
-    msg.key.remoteJid,
+    job.chatId,
+    {
+      ...msg,
+      mimetype: type === "audio" ? "audio/mpeg" : "video/mp4",
+      fileName: `${job.title}.${type === "audio" ? "mp3" : "mp4"}`
+    },
+    { quoted }
+  )
+}
+
+const pending = {}
+
+function addPending(id, data) {
+  pending[id] = data
+  setTimeout(() => delete pending[id], 15 * 60 * 1000)
+}
+
+export default async function handler(msg, { conn, text }) {
+  const pref = global.prefixes?.[0] || "."
+
+  if (!text?.trim()) {
+    return conn.sendMessage(
+      msg.chat,
+      { text: `✳️ Usa:\n${pref}play <término>\nEj: ${pref}play bad bunny` },
+      { quoted: msg }
+    )
+  }
+
+  await conn.sendMessage(msg.chat, { react: { text: "🕒", key: msg.key } })
+
+  const res = await yts(text)
+  const video = res.videos?.[0]
+  if (!video) {
+    return conn.sendMessage(msg.chat, { text: "❌ Sin resultados." }, { quoted: msg })
+  }
+
+  const { url, title, timestamp, views, author, thumbnail } = video
+
+  const caption = `
+┏━[ *MAU BOT Music 🎧* ]━┓
+┃🎵 Título: ${title}
+┃⏱️ Duración: ${timestamp}
+┃👁️ Vistas: ${(views || 0).toLocaleString()}
+┃👤 Autor: ${author?.name || author}
+┗━━━━━━━━━━━━━━━━━━┛
+
+📥 Reacciona:
+👍 Audio MP3
+❤️ Video MP4
+📄 Audio Documento
+📁 Video Documento
+`.trim()
+
+  const preview = await conn.sendMessage(
+    msg.chat,
     { image: { url: thumbnail }, caption },
     { quoted: msg }
-  );
+  )
 
-  // descarga y envía el audio
-  await downloadAudio(conn, msg, videoUrl, title);
+  addPending(preview.key.id, {
+    chatId: msg.chat,
+    videoUrl: url,
+    title,
+    commandMsg: msg,
+    sender: msg.participant || msg.key.participant
+  })
 
-  // reacción final
-  await conn.sendMessage(msg.key.remoteJid, {
-    react: { text: "✅", key: msg.key }
-  });
-};
+  await conn.sendMessage(msg.chat, { react: { text: "✅", key: msg.key } })
 
-// ==== DESCARGA DE AUDIO ====
-async function downloadAudio(conn, msg, videoUrl, title) {
-  const chatId = msg.key.remoteJid;
+  if (conn._playListener) return
+  conn._playListener = true
 
-  const data = await callMyApi(videoUrl, "audio");
-  const mediaUrl = data.audio || data.video;
-  if (!mediaUrl) throw new Error("No se pudo obtener audio");
+  conn.ev.on("messages.upsert", async ev => {
+    for (const m of ev.messages || []) {
+      const react = m.message?.reactionMessage
+      const ctx = m.message?.extendedTextMessage?.contextInfo
+      const stanza = react?.key?.id || ctx?.stanzaId
+      const job = pending[stanza]
+      if (!job) continue
 
-  const tmp = path.join(process.cwd(), "tmp");
-  if (!fs.existsSync(tmp)) fs.mkdirSync(tmp, { recursive: true });
+      const sender = m.key.participant || m.participant
+      if (sender !== job.sender) continue
 
-  const urlPath = new URL(mediaUrl).pathname || "";
-  const ext = (urlPath.split(".").pop() || "").toLowerCase();
-  const isMp3 = ext === "mp3";
+      let choice = react?.text
+      if (!choice && ctx) {
+        const txt = (m.message?.conversation || m.message?.extendedTextMessage?.text || "").trim()
+        if (["1", "audio"].includes(txt)) choice = "👍"
+        else if (["2", "video"].includes(txt)) choice = "❤️"
+        else if (["3", "videodoc"].includes(txt)) choice = "📁"
+        else if (["4", "audiodoc"].includes(txt)) choice = "📄"
+      }
 
-  const inFile = path.join(tmp, `${Date.now()}_in.${ext || "bin"}`);
-  await downloadToFile(mediaUrl, inFile);
+      if (!["👍", "❤️", "📄", "📁"].includes(choice)) continue
 
-  let outFile = inFile;
-  if (!isMp3) {
-    const tryOut = path.join(tmp, `${Date.now()}_out.mp3`);
-    try {
-      await new Promise((resolve, reject) =>
-        ffmpeg(inFile)
-          .audioCodec("libmp3lame")
-          .audioBitrate("128k")
-          .format("mp3")
-          .save(tryOut)
-          .on("end", resolve)
-          .on("error", reject)
-      );
-      outFile = tryOut;
-      try { fs.unlinkSync(inFile); } catch {}
-    } catch {
-      outFile = inFile;
+      const map = {
+        "👍": ["audio", false],
+        "📄": ["audio", true],
+        "❤️": ["video", false],
+        "📁": ["video", true]
+      }
+
+      const [type, isDoc] = map[choice]
+
+      const cached = cache[job.videoUrl]?.files?.[type]
+      if (cached && fs.existsSync(cached)) {
+        await conn.sendMessage(
+          job.chatId,
+          { text: `⚡ Mandando desde cache: ${type}` },
+          { quoted: job.commandMsg }
+        )
+        await sendFile(conn, job, cached, isDoc, type, job.commandMsg)
+        continue
+      }
+
+      await conn.sendMessage(
+        job.chatId,
+        { text: `⏳ Descargando ${type}...` },
+        { quoted: job.commandMsg }
+      )
+
+      let mediaUrl
+      try {
+        mediaUrl = await callYoutubeResolve(job.videoUrl, { type })
+      } catch (e) {
+        await conn.sendMessage(job.chatId, { text: `❌ Error API: ${e}` }, { quoted: job.commandMsg })
+        continue
+      }
+
+      if (!mediaUrl) {
+        await conn.sendMessage(job.chatId, { text: "❌ No se pudo obtener enlace." }, { quoted: job.commandMsg })
+        continue
+      }
+
+      try {
+        const file = await startDownload(job.videoUrl, type, mediaUrl)
+        cache[job.videoUrl] = cache[job.videoUrl] || { timestamp: Date.now(), files: {} }
+        cache[job.videoUrl].files[type] = file
+        saveCache()
+        await sendFile(conn, job, file, isDoc, type, job.commandMsg)
+      } catch (e) {
+        await conn.sendMessage(job.chatId, { text: `❌ Error: ${e}` }, { quoted: job.commandMsg })
+      }
     }
-  }
-
-  const sizeMB = fileSizeMB(outFile);
-  if (sizeMB > 99) {
-    try { fs.unlinkSync(outFile); } catch {}
-    await conn.sendMessage(chatId, { text: `❌ El archivo de audio pesa ${sizeMB.toFixed(2)}MB (>99MB).` }, { quoted: msg });
-    return;
-  }
-
-  const buffer = fs.readFileSync(outFile);
-  await conn.sendMessage(chatId, {
-    audio: buffer,
-    mimetype: "audio/mpeg",
-    fileName: `${title}.mp3`
-  }, { quoted: msg });
-
-  try { fs.unlinkSync(outFile); } catch {}
+  })
 }
 
-// ==== METADATOS ====
-handler.command = ["play", "audio"];
-handler.help = ["play <término>", "audio <nombre>"];
-handler.tags = ["descargas"];
-
-export default handler;
+handler.help = ["play <texto>"]
+handler.tags = ["descargas"]
+handler.command = ["play"]
