@@ -1,119 +1,175 @@
-import fs from 'fs';
-import path from 'path';
-import FormData from 'form-data';
-import axios from 'axios';
-import ffmpeg from 'fluent-ffmpeg';
-import { downloadContentFromMessage } from '@whiskeysockets/baileys';
+import fs from 'fs'
+import path from 'path'
+import FormData from 'form-data'
+import axios from 'axios'
+import ffmpeg from 'fluent-ffmpeg'
+import crypto from 'crypto'
+import { fileTypeFromBuffer } from 'file-type'
 
-const handler = async (msg, { conn, command }) => {
-  const chatId = msg.key.remoteJid;
-  const pref = global.prefixes?.[0] || ".";
+function unwrapMessage(m) {
+  let n = m
+  while (
+    n?.viewOnceMessage?.message ||
+    n?.viewOnceMessageV2?.message ||
+    n?.viewOnceMessageV2Extension?.message ||
+    n?.ephemeralMessage?.message
+  ) {
+    n =
+      n.viewOnceMessage?.message ||
+      n.viewOnceMessageV2?.message ||
+      n.viewOnceMessageV2Extension?.message ||
+      n.ephemeralMessage?.message
+  }
+  return n
+}
 
-  // 📌 Detectar si viene un archivo directo o citado
-  let quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-  let mediaMessage = null;
-  let typeDetected = null;
+function ensureWA(wa, conn) {
+  if (wa?.downloadContentFromMessage) return wa
+  if (conn?.wa?.downloadContentFromMessage) return conn.wa
+  if (global.wa?.downloadContentFromMessage) return global.wa
+  return null
+}
 
-  // 🔹 Si no hay quoted, intentamos detectar en el mismo mensaje
+function extFromMime(mime, fallback = 'bin') {
+  if (!mime) return fallback
+  const m = mime.toLowerCase()
+  if (m.includes('image/')) return 'jpg'
+  if (m.includes('video/')) return 'mp4'
+  if (m.includes('audio/')) return 'mp3'
+  if (m.includes('pdf')) return 'pdf'
+  return fallback
+}
+
+async function uploadToCatbox(filePath) {
+  const buffer = await fs.promises.readFile(filePath)
+  const { ext, mime } = await fileTypeFromBuffer(buffer) || {}
+  const random = crypto.randomBytes(5).toString('hex')
+  const filename = `${random}.${ext || 'bin'}`
+
+  const form = new FormData()
+  form.append('reqtype', 'fileupload')
+  form.append('fileToUpload', buffer, {
+    filename,
+    contentType: mime || 'application/octet-stream'
+  })
+
+  const res = await axios.post(
+    'https://catbox.moe/user/api.php',
+    form,
+    {
+      headers: form.getHeaders(),
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
+    }
+  )
+
+  if (!res.data) throw new Error('Catbox no devolvió URL')
+  return res.data.trim()
+}
+
+let handler = async (msg, { conn, command, wa }) => {
+  const chatId = msg.key.remoteJid
+  const pref = global.prefixes?.[0] || '.'
+
+  const ctx = msg.message?.extendedTextMessage?.contextInfo
+  const rawQuoted = ctx?.quotedMessage
+  const quoted = rawQuoted ? unwrapMessage(rawQuoted) : null
+
   if (!quoted) {
-    if (msg.message?.imageMessage) {
-      typeDetected = 'image';
-      mediaMessage = msg.message.imageMessage;
-    } else if (msg.message?.videoMessage) {
-      typeDetected = 'video';
-      mediaMessage = msg.message.videoMessage;
-    } else if (msg.message?.stickerMessage) {
-      typeDetected = 'sticker';
-      mediaMessage = msg.message.stickerMessage;
-    } else if (msg.message?.audioMessage) {
-      typeDetected = 'audio';
-      mediaMessage = msg.message.audioMessage;
-    }
-  } else {
-    if (quoted.imageMessage) {
-      typeDetected = 'image';
-      mediaMessage = quoted.imageMessage;
-    } else if (quoted.videoMessage) {
-      typeDetected = 'video';
-      mediaMessage = quoted.videoMessage;
-    } else if (quoted.stickerMessage) {
-      typeDetected = 'sticker';
-      mediaMessage = quoted.stickerMessage;
-    } else if (quoted.audioMessage) {
-      typeDetected = 'audio';
-      mediaMessage = quoted.audioMessage;
-    }
+    return conn.sendMessage(
+      chatId,
+      { text: `✳️ Usa:\n${pref}${command}\nResponde a una imagen, video, sticker o audio` },
+      { quoted: msg }
+    )
   }
 
-  if (!mediaMessage) {
-    return conn.sendMessage(chatId, {
-      text: `🏞️ *𝚁𝚎𝚜𝚙𝚘𝚗𝚍𝚎 𝚊 𝚞𝚗𝚊 𝙸𝚖𝚊𝚐𝚎𝚗, 𝚅𝚒𝚍𝚎𝚘 𝚘 𝙰𝚞𝚍𝚒𝚘 𝚙𝚊𝚛𝚊 𝚂𝚞𝚋𝚒𝚛 𝚎𝚕 𝚞𝚛𝚕*.`
-    }, { quoted: msg });
-  }
+  await conn.sendMessage(chatId, { react: { text: '☁️', key: msg.key } })
 
-  await conn.sendMessage(chatId, { react: { text: '☁️', key: msg.key } });
+  let rawPath
+  let finalPath
 
   try {
-    const tmpDir = path.join(process.cwd(), 'tmp');
-    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir);
+    let type
+    let media
 
-    const rawExt = typeDetected === 'sticker' ? 'webp' :
-      mediaMessage.mimetype ? mediaMessage.mimetype.split('/')[1].split(';')[0] : 'bin';
-
-    const rawPath = path.join(tmpDir, `${Date.now()}_input.${rawExt}`);
-    const stream = await downloadContentFromMessage(mediaMessage, typeDetected === 'sticker' ? 'sticker' : typeDetected);
-    const writeStream = fs.createWriteStream(rawPath);
-    for await (const chunk of stream) writeStream.write(chunk);
-    writeStream.end();
-    await new Promise(resolve => writeStream.on('finish', resolve));
-
-    const stats = fs.statSync(rawPath);
-    if (stats.size > 200 * 1024 * 1024) {
-      fs.unlinkSync(rawPath);
-      throw new Error('⚠️ *𝙴𝚕 𝙰𝚛𝚌𝚑𝚒𝚟𝚘 𝚎𝚜 𝚖𝚞𝚢 𝙶𝚛𝚊𝚗𝚍𝚎*.');
+    if (quoted.imageMessage) {
+      type = 'image'
+      media = quoted.imageMessage
+    } else if (quoted.videoMessage) {
+      type = 'video'
+      media = quoted.videoMessage
+    } else if (quoted.stickerMessage) {
+      type = 'sticker'
+      media = quoted.stickerMessage
+    } else if (quoted.audioMessage) {
+      type = 'audio'
+      media = quoted.audioMessage
+    } else {
+      throw new Error('Tipo no permitido')
     }
 
-    let finalPath = rawPath;
-    if (typeDetected === 'audio' && ['ogg', 'm4a', 'mpeg'].includes(rawExt)) {
-      finalPath = path.join(tmpDir, `${Date.now()}_converted.mp3`);
-      await new Promise((resolve, reject) => {
+    const WA = ensureWA(wa, conn)
+    if (!WA) throw new Error('Baileys no disponible')
+
+    const tmpDir = path.join(path.dirname(new URL(import.meta.url).pathname), 'tmp')
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true })
+
+    const ext = type === 'sticker' ? 'webp' : extFromMime(media.mimetype)
+    rawPath = path.join(tmpDir, `${Date.now()}.${ext}`)
+
+    const stream = await WA.downloadContentFromMessage(
+      media,
+      type === 'sticker' ? 'sticker' : type
+    )
+
+    const ws = fs.createWriteStream(rawPath)
+    for await (const chunk of stream) ws.write(chunk)
+    ws.end()
+    await new Promise(r => ws.on('finish', r))
+
+    const size = fs.statSync(rawPath).size
+    if (size > 200 * 1024 * 1024) throw new Error('Archivo supera 200MB')
+
+    finalPath = rawPath
+
+    if (type === 'audio' && ext !== 'mp3') {
+      finalPath = path.join(tmpDir, `${Date.now()}_audio.mp3`)
+      await new Promise((res, rej) => {
         ffmpeg(rawPath)
           .audioCodec('libmp3lame')
           .toFormat('mp3')
-          .on('end', resolve)
-          .on('error', reject)
-          .save(finalPath);
-      });
-      fs.unlinkSync(rawPath);
+          .on('end', res)
+          .on('error', rej)
+          .save(finalPath)
+      })
+      fs.unlinkSync(rawPath)
     }
 
-    const form = new FormData();
-    form.append('file', fs.createReadStream(finalPath));
-    const res = await axios.post('https://cdn.russellxz.click/upload.php', form, {
-      headers: form.getHeaders(),
-    });
+    const url = await uploadToCatbox(finalPath)
 
-    fs.unlinkSync(finalPath);
+    await conn.sendMessage(
+      chatId,
+      { text: `✅ Archivo subido a Catbox\n\n${url}` },
+      { quoted: msg }
+    )
 
-    if (!res.data || !res.data.url) throw new Error('❌ *𝙽𝚘 𝚂𝚎 𝚙𝚞𝚍𝚘 𝚜𝚞𝚋𝚒𝚛 𝚎𝚕 𝙰𝚛𝚌𝚑𝚒𝚟𝚘*.');
+    await conn.sendMessage(chatId, { react: { text: '✅', key: msg.key } })
 
-    await conn.sendMessage(chatId, {
-      text: `➤ 𝖮𝖱𝖣𝖤𝖭 𝖤𝖩𝖤𝖢𝖴𝖳𝖠𝖣𝖠 ✅
-
-𝖠𝖱𝖢𝖧𝖨𝖵𝖮 𝖲𝖴𝖡𝖨𝖣𝖮 𝖢𝖮𝖱𝖱𝖤𝖢𝖳𝖠𝖬𝖤𝖭𝖳𝖤. 𝖠𝖰𝖴𝖨 𝖳𝖨𝖤𝖭𝖤 𝖲𝖴 𝖴𝖱𝖫:\n${res.data.url}`
-    }, { quoted: msg });
-
-    await conn.sendMessage(chatId, { react: { text: '✅', key: msg.key } });
-
-  } catch (err) {
-    console.error("❌ Error en .tourl:", err);
-    await conn.sendMessage(chatId, { text: `❌ *Error:* ${err.message}` }, { quoted: msg });
-    await conn.sendMessage(chatId, { react: { text: '❌', key: msg.key } });
+  } catch (e) {
+    await conn.sendMessage(
+      chatId,
+      { text: `❌ Error\n${e.message}` },
+      { quoted: msg }
+    )
+    await conn.sendMessage(chatId, { react: { text: '❌', key: msg.key } })
+  } finally {
+    try { if (rawPath) fs.unlinkSync(rawPath) } catch {}
+    try { if (finalPath && finalPath !== rawPath) fs.unlinkSync(finalPath) } catch {}
   }
-};
+}
 
-handler.command = ['tl', 'tourl'];
-handler.help = ['tourl'];
-handler.tags = ['herramientas'];
+handler.command = ['tourl']
+handler.help = ['tourl']
+handler.tags = ['herramientas']
 
-export default handler;
+export default handler
